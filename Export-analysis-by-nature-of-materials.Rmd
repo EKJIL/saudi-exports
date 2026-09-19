@@ -1,0 +1,910 @@
+---
+title: "Has the Composition of Saudi Exports Shifted?"
+author:  "Abdullah Adel Al-Madhi"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: readable
+    highlight: pygments
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: false
+    code_folding: show
+    df_print: kable
+    fig_caption: true
+    self_contained: true
+---
+
+# 1. Introduction
+ 
+Saudi Arabia has been working to reduce its dependence on raw material
+exports as part of **Vision 2030**. The usual way to measure this is to
+look at total export values, but this approach has a problem: export
+values move with **oil prices** and **inflation**, so a rise in value
+does not necessarily mean a change in structure.
+ 
+This report asks a different question:
+ 
+> **Has the composition of Saudi exports shifted from raw materials
+> toward manufactured goods between 2015 and 2026?**
+ 
+To answer it we look at four things:
+ 
+1.  **What the composition looks like** and how it changed over the
+    period.
+ 
+2.  **Whether the change is real growth** or only a side effect of
+    falling oil exports.
+ 
+3.  **Whether the observed trend is statistically significant** rather
+    than random fluctuation.
+ 
+4.  **Where the trend is heading** by 2030, and how much confidence we
+    can place in that forecast.
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width = 7, fig.height = 4, fig.align = "center")
+```
+ 
+# 2. The Data
+ 
+The data comes from the **Statistical Database** of the General Authority
+for Statistics. It covers monthly export values from **January 2015 to
+May 2026**, which gives us **137 months**. Exports are classified by
+nature of materials into three categories:
+ 
+1. **Manufactured** — finished industrial products, the highest
+   value-added category.
+ 
+2. **Semi-manufactured** — partially processed goods such as
+   petrochemicals and refined products.
+ 
+3. **Raw materials** — unprocessed exports, mainly crude oil.
+ 
+These three categories are not arbitrary. They form a **value-added
+ladder**, and moving up this ladder is exactly what economic
+diversification means in practice.
+ 
+## 2.1 Preparing the data
+ 
+The original file was not ready for analysis and needed three steps:
+ 
+1. The data came at the **transaction level**, meaning every single
+   export operation had its own row. This gave **1,611,855 rows** in
+   total, so we aggregated them by category and month. The result is
+   **411 observations**, which is 137 months for each of the three
+   categories.
+ 
+2. The **date format** was not consistent. January was written as
+   `YYYY / MM` while every other month used `M/D/YY`, so both formats
+   had to be converted before the series could be ordered in time.
+ 
+3. The **export values** were stored as text with thousand separators,
+   so they had to be converted to numeric.
+ 
+```{r libraries, message=FALSE, warning=FALSE}
+library(ggplot2)     # Graphs
+library(forecast)    # Arima & ggAcf & AutoPlot
+library(tseries)     # ADF Test
+library(patchwork)   # Merge two Graphs
+library(sandwich)    # standard errors Correction
+library(lmtest)      # coeftest
+library(kableExtra)  # Summary tables
+ 
+theme_set(theme_minimal(base_size = 11) +
+          theme(plot.background  = element_rect(fill = "#fdf6e3", color = NA),
+                panel.background = element_rect(fill = "#fdf6e3", color = NA),
+                panel.grid.major = element_line(color = "#eadfc0", linewidth = 0.4),
+                panel.grid.minor = element_blank()))
+```
+ 
+```{r}
+# Clean file
+monthly = read.csv("exports_clean.csv", fileEncoding = "UTF-8")
+ 
+monthly$date     = as.Date(monthly$date)
+monthly$category = trimws(monthly$category)
+ 
+# Category labels: Arabic -> English
+lab = c("مواد خام"  = "Raw",
+        "نصف مصنعة" = "Semi-manufactured",
+        "مصنعة"     = "Manufactured")
+ 
+monthly$cat = unname(lab[monthly$category])
+ 
+monthly$cat = factor(monthly$cat,
+  levels = c("Raw", "Semi-manufactured", "Manufactured"))
+ 
+stopifnot(!any(is.na(monthly$cat)))
+ 
+monthly = monthly[order(monthly$date, monthly$cat), ]
+rownames(monthly) = NULL
+ 
+# Year, for the yearly comparisons
+monthly$year = as.numeric(format(monthly$date, "%Y"))
+ 
+# Share = category value / total for the same month
+monthly$share = 100 * monthly$value / ave(monthly$value, monthly$date, FUN = sum)
+ 
+# Monthly total, in SAR million
+tot = tapply(monthly$value, monthly$date, sum)
+ 
+man   = monthly[monthly$cat == "Manufactured", ]
+man   = man[order(man$date), ]
+man$t = 1:nrow(man)   # 1 = January 2015 ... 137 = May 2026
+ 
+stopifnot(all(c("date", "cat", "year", "share", "value") %in% names(monthly)))
+ 
+cat("rows:", nrow(monthly), "| months:", length(unique(monthly$date)), "\n")
+cat("range:", format(range(monthly$date)), "\n")
+```
+ 
+## 2.2 Working with shares
+ 
+Since the question is about **composition** and not about volume, we do
+not use the export values directly. For each month we compute the
+**share** of each category:
+ 
+$$s_{i,t} = \frac{V_{i,t}}{\sum_{j} V_{j,t}} \times 100$$
+ 
+where $V_{i,t}$ is the export value of category $i$ in month $t$, and
+$i \in \{\text{Manufactured}, \text{Semi-manufactured}, \text{Raw}\}$.
+ 
+By construction the three shares satisfy:
+ 
+$$\sum_{i} s_{i,t} = 100 \qquad \text{for every month } t$$
+ 
+This matters because absolute export values move with **oil prices** and
+**inflation**. A year where oil prices double would show a large rise in
+total exports without any real change in what the country actually
+produces. To see why the share removes that effect, suppose every
+category's value is multiplied by a common factor $\lambda_t > 0$:
+ 
+$$
+\tilde{s}_{i,t}
+= \frac{\lambda_t V_{i,t}}{\sum_j \lambda_t V_{j,t}} \times 100
+= s_{i,t}
+$$
+ 
+The share is invariant to any common scaling of the three series. What
+survives is the structure itself.
+ 
+We return to this choice in Section 10, because working with shares also
+introduces a constraint that affects how the results should be read.
+ 
+# 3. Descriptive Statistics
+ 
+Before examining how the composition changed over time, it is worth
+seeing what each category looks like across the whole period. The tables
+below report the five-number summary, the mean and the standard
+deviation — first for each category's share of total exports, then for
+its value in absolute terms. All values are in millions of Saudi riyals
+(SAR million); total monthly exports averaged
+**`r format(round(mean(tot)), big.mark = ",")`** SAR million over the
+period, or roughly
+**`r sprintf("%.2f", 12 * mean(tot) / 1e6)`** trillion riyals a year.
+ 
+```{r}
+stats = function(x) c(summary(x), "Standard Deviation" = sd(x))
+ 
+round(sapply(split(monthly$share, monthly$cat), stats), 2)
+round(sapply(split(monthly$value, monthly$cat), stats), 1)
+```
+ 
+Four points stand out.
+ 
+1. **Raw materials dominate the composition.** Their share averages
+   **62.1%**, roughly three times the manufactured share (**20.5%**) and
+   three and a half times the semi-manufactured share (**17.4%**). Even
+   in its weakest month the raw share held **50.5%**, so raw materials
+   never fell below half of total exports.
+ 
+2. **The share series are skewed in opposite directions.** For raw
+   materials the mean (**62.09**) falls below the median (**62.90**), and
+   the distance from the minimum to the first quartile (**8.15** points)
+   exceeds the distance from the third quartile to the maximum (**5.58**
+   points): the long tail lies on the low side. The other two categories
+   show the mirror image — manufactured has a mean (**20.51**) above its
+   median (**19.37**), with an upper tail of **11.82** points against a
+   lower tail of only **4.36**.
+ 
+3. **Dispersion is not the same as instability.** Measured on shares, raw
+   materials have the largest standard deviation (**4.48**), slightly
+   above manufactured (**4.22**), with semi-manufactured the most stable
+   (**3.02**). Measured on values, the ranking reverses: relative to its
+   own mean, manufactured exports vary the most (6900.8 / 17737.8 ≈
+   **39%**), raw materials less (**28%**), and semi-manufactured least
+   (**20%**).
+ 
+4. **The manufactured series covers a wide range.** Its share runs from
+   **13.5%** to **33.7%**, a spread of 20 points, and its value from
+   **6,787** to **34,256** SAR million — a factor of five between the
+   weakest and the strongest month.
+ 
+Taken together, the skew running in one direction for raw materials and
+in the opposite direction for the other two categories suggests the
+extreme months are not scattered at random, but concentrated at one end
+of the period. The next section examines that directly.
+ 
+# 4. How the Composition Changed
+ 
+```{r, fig.width=8, fig.height=4.5}
+pal = c("Raw"               = "#1baf7a",
+        "Semi-manufactured" = "#eb6834",
+        "Manufactured"      = "#2a78d6")
+ends = monthly[monthly$date == max(monthly$date), ]
+ 
+ggplot(monthly, aes(date, share, color = cat)) +
+  geom_line(linewidth = 0.9) +
+  geom_text(data = ends, aes(label = sprintf("%s  %.1f%%", cat, share)),
+            hjust = 0, nudge_x = 60, size = 3.2, fontface = "bold",
+            show.legend = FALSE) +
+  scale_color_manual(values = pal) +
+  scale_x_date(expand = expansion(mult = c(0.02, 0.28))) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "Composition of Saudi Exports by Nature of Materials",
+       subtitle = "Monthly share of total exports, January 2015 - May 2026",
+       x = NULL, y = NULL) +
+  theme(legend.position = "none",
+        plot.title      = element_text(face = "bold", size = 13),
+        plot.subtitle   = element_text(color = "grey40", size = 9.5),
+        axis.text       = element_text(color = "grey35"))
+```
+ 
+The chart shows the answer to our first question. The **manufactured**
+share starts at **`r sprintf("%.1f%%", man$share[1])`** in January 2015
+and ends at **`r sprintf("%.1f%%", man$share[nrow(man)])`** in May 2026,
+while the **raw materials** share moves in the opposite direction. The
+**semi-manufactured** share changes very little.
+ 
+Two features of the chart deserve attention:
+ 
+1. **The movement is not smooth.** All three series fluctuate month to
+   month, and there are sharp reversals in 2016, 2020 and 2023. We come
+   back to these in Section 5.4.
+ 
+2. **The rise is not constant.** The manufactured share climbs quickly
+   until 2016, stays roughly flat between 2017 and 2020, then rises again
+   and accelerates toward the end of the period.
+ 
+To put numbers on what the chart shows, we compare the average share in
+the first full year with the last full year.
+ 
+## 4.1 Comparing shares: 2015 against 2025
+ 
+```{r}
+aggregate(share ~ cat + year,
+          data = monthly[monthly$year %in% c(2015, 2025), ],
+          FUN = mean)
+```
+ 
+ The two years are ten apart and the contrast is sharp. The manufactured
+share nearly doubled, from **16.5%** to **29.1%**, a gain of **12.6**
+percentage points. Raw materials gave up almost exactly that amount,
+falling **10.8** points from **65.4%** to **54.6%**, while the
+semi-manufactured share edged down **1.7** points. The adding-up
+constraint guarantees that these three changes sum to zero, so the
+question is not whether one category rose at another's expense — it
+must have — but whether the rise reflects real expansion. The next
+section answers that.
+
+
+## 4.2 Checking the absolute values
+ 
+A share can rise for two very different reasons: the numerator grew, or
+the denominator shrank. The question matters, because only the first is
+diversification. Writing the manufactured share in full makes the
+ambiguity explicit:
+ 
+$$
+s_{\text{Man},t} = \frac{V_{\text{Man},t}}
+{V_{\text{Man},t} + V_{\text{Semi},t} + V_{\text{Raw},t}} \times 100
+$$
+ 
+The share rises either when the numerator grows or when
+$V_{\text{Raw},t}$ falls, and shares alone cannot tell the two apart.
+The absolute values settle it.
+ 
+```{r}
+yearly = aggregate(value ~ cat + year, data = monthly, FUN = sum)
+yearly[yearly$year %in% c(2015, 2025), ]
+```
+ 
+ The absolute figures are decisive, and they are more favourable to the
+diversification story than the shares alone suggest. Manufactured exports
+rose from **124.6** to **340.1** billion riyals — a factor of **2.7**, or
+**10.6%** a year compounded. Crucially, raw material exports did **not**
+collapse: they grew from **501.8** to **637.7** billion, up **27%** over
+the decade. Semi-manufactured exports grew **40%**.
+
+All three categories expanded. The manufactured share therefore rose not
+because oil exports shrank, but because manufacturing grew roughly four
+times faster than raw materials — **10.6%** a year against **2.4%**.
+This is the strongest form the result could take: a compositional shift
+driven entirely by differential growth, with no contraction anywhere in
+the denominator.
+
+## 4.3 Testing the trend
+ 
+A rising line in a chart is not evidence on its own. We fit a linear
+trend and test whether its slope differs from zero:
+ 
+$$
+s_t = \beta_0 + \beta_1 t + \varepsilon_t,
+\qquad
+H_0: \beta_1 = 0
+\quad \text{vs} \quad
+H_1: \beta_1 \neq 0
+$$
+ 
+where $\beta_1$ is the average change in the share per month, in
+percentage points.
+ 
+```{r}
+trend_model = lm(share ~ t, data = man)
+summary(trend_model)
+```
+ 
+The ordinary least squares standard errors above are not trustworthy on
+their own. In a time series the residuals are **autocorrelated**: a month
+that sits above the trend line is usually followed by another month above
+it. OLS treats the observations as independent, so it understates the
+standard error and overstates significance. The Newey-West estimator
+corrects for this, leaving the slope estimate unchanged.
+ 
+```{r}
+coeftest(trend_model, vcov = NeweyWest(trend_model))
+```
+The slope survives the correction. At **0.079** percentage points a month
+— **0.95** points a year — the trend remains significant at the 1% level
+($p = 0.0034$) even with the standard error widened for autocorrelation.
+The linear model explains **55%** of the variation in the manufactured
+share ($R^2 = 0.554$), which is high for a monthly series of this length
+and confirms that the movement in the chart is a trend rather than drift
+around a fixed level.
+ 
+```{r}
+# Slope in percentage points per year
+round(coef(trend_model)["t"] * 12, 3)
+```
+ 
+# 5. Structure of the Series
+ 
+```{r}
+man_ts = ts(man$share, start = c(2015, 1), frequency = 12)
+ 
+length(man_ts)      # 137
+start(man_ts)       # 2015/1
+end(man_ts)         # 2026/5
+frequency(man_ts)   # 12
+```
+ 
+## 5.1 STL Decomposition
+ 
+STL splits the series into three additive components:
+ 
+$$
+y_t = T_t + S_t + R_t
+$$
+ 
+the trend-cycle, the seasonal component, and the remainder.
+ 
+```{r, fig.width=8, fig.height=5}
+fit = stl(man_ts, s.window = "periodic")
+ 
+autoplot(fit) +
+  labs(title = "STL Decomposition of the Manufactured Share")
+```
+ 
+## 5.2 Strength of Each Component
+ 
+A common mistake here is to divide each component's variance by the
+variance of the series and read the results as percentages. The
+components are correlated, so those figures do not add to 100 and cannot
+be interpreted as shares. The standard measure compares each component
+against the remainder instead, giving a value between 0 and 1:
+ 
+$$
+F_T = \max\!\left(0,\, 1 - \frac{\mathrm{Var}(R_t)}{\mathrm{Var}(T_t + R_t)}\right),
+\qquad
+F_S = \max\!\left(0,\, 1 - \frac{\mathrm{Var}(R_t)}{\mathrm{Var}(S_t + R_t)}\right)
+$$
+ 
+A value near 1 means the component dominates the noise; a value near 0
+means it is indistinguishable from it.
+ 
+```{r}
+comp = fit$time.series
+R    = comp[, "remainder"]
+round(c(trend    = max(0, 1 - var(R) / var(comp[, "trend"]    + R)),
+        seasonal = max(0, 1 - var(R) / var(comp[, "seasonal"] + R))), 3)
+ 
+ 
+round(c(seasonal  = diff(range(comp[, "seasonal"])),
+        remainder = diff(range(R)),
+        data      = diff(range(man_ts))), 2)
+```
+The decomposition is lopsided. The trend strength is **0.883**, close to
+the upper bound of 1: almost everything in this series is trend. The
+seasonal strength is **0.082**, near zero, so the seasonal component is
+barely distinguishable from noise.
+
+The ranges confirm it. The seasonal component spans only **1.57**
+percentage points across the whole period, against **9.26** for the
+remainder and **20.20** for the series itself. Seasonality accounts for
+less than a tenth of the movement the data actually shows — a finding
+that shapes the modelling choices in Section 6.
+
+
+
+## 5.3 Seasonality Check
+ 
+```{r}
+a = acf(man_ts, lag.max = 24, main = "ACF - Seasonal Check")
+setNames(round(as.numeric(a$acf)[12:14], 3), paste("lag", 11:13))
+round(2 / sqrt(length(man_ts)), 3)
+```
+
+There is no annual seasonality. A seasonal series would show an isolated
+peak at lag 12, standing clear of its neighbours. Instead the three
+values decline smoothly — **0.453** at lag 11, **0.431** at lag 12,
+**0.413** at lag 13 — with no peak at all.
+
+All three exceed the significance bound of **0.171**, but that reflects
+the trend rather than a seasonal cycle: a trending series is correlated
+with itself at every lag. The gradual decay is the signature of a trend,
+not of a repeating annual pattern, and it agrees with the seasonal
+strength of 0.082 found above. 
+ 
+ 
+## 5.4 Shock Analysis
+ 
+```{r}
+idx = order(abs(R), decreasing = TRUE)[1:6]
+ 
+data.frame(date  = format(man$date[idx], "%Y-%m"),
+           shock = round(R[idx], 2))
+```
+ 
+```{r}
+monthly[monthly$date %in% man$date[idx],
+        c("date", "cat", "value", "share")]
+```
+
+
+Two of these months make the same point from opposite directions, and
+together they justify the whole approach of this report.
+
+**July 2025** is the largest positive shock at **+5.22** points. Here the
+share of 33.6% reflects genuine expansion: manufactured exports reached
+**34,256** million riyals, their highest value in the entire series,
+while raw materials at 51,432 million sat near their long-run average.
+The numerator moved.
+
+**May 2020** is the fourth largest at **+3.45** points — and it means the
+opposite. Manufactured exports that month were only **8,182** million,
+close to their minimum for the whole period. The share rose because raw
+materials collapsed to **19,859** million, their lowest value in eleven
+years, as oil markets seized during the first months of the pandemic. The
+denominator moved.
+
+Read from the shares alone, both months look like progress. Read against
+the absolute values, one is growth and the other is contraction elsewhere.
+This is precisely the ambiguity set out in Section 4.2, appearing here in
+two specific months.
+
+The negative shocks share a pattern: February 2020, October and November
+2023, and January 2017 are all months when raw materials stood well above
+their average — between 66.9% and 69.6% of exports — compressing the
+manufactured share arithmetically. 
+ 
+ 
+ 
+# 6. Modelling
+ 
+## 6.1 Stationarity Test
+ 
+ARIMA requires a stationary series. The Augmented Dickey-Fuller test
+takes
+ 
+$$
+H_0: \text{the series has a unit root (non-stationary)}
+$$
+ 
+Note that the null here is the *undesirable* case, the reverse of the
+usual convention: a **small** $p$-value is the good outcome.
+ 
+```{r, warning = FALSE}
+adf.test(man_ts)
+adf.test(diff(man_ts))
+```
+The result is unambiguous. On the level the test statistic is **-1.08**
+with $p = 0.92$: nowhere near rejection, so we cannot rule out a unit
+root. After first differencing the statistic falls to **-6.23** with
+$p < 0.01$, comfortably rejecting non-stationarity.
+
+The series is therefore integrated of order one, $d = 1$, and the
+differenced series is what the model should be built on. 
+ 
+ 
+ 
+## 6.2 ACF and PACF After Differencing
+ 
+```{r, fig.width=8, fig.height=3.2}
+p1 = ggAcf(diff(man_ts),  lag.max = 24) + labs(title = "ACF")
+p2 = ggPacf(diff(man_ts), lag.max = 24) + labs(title = "PACF")
+ 
+p1 | p2
+```
+
+The two functions point the same way. The ACF of the differenced series
+shows significant **negative** autocorrelation at lags 1 and 2, both
+beyond the confidence bounds, and then falls inside them and stays there.
+The PACF, by contrast, does not cut off: it starts negative and decays
+gradually across the early lags.
+
+That combination is the signature of a moving-average process of order
+two. An $\mathrm{AR}(p)$ process would show the reverse — a PACF cutting
+off at lag $p$ with a slowly decaying ACF. The reading therefore suggests
+$\mathrm{ARIMA}(0,1,2)$, and Section 6.3 can be checked against it rather
+than accepted on trust.
+
+Neither plot shows anything notable at lag 12, which agrees with the
+seasonality check in Section 5.3. A small number of bars near lags 20 to
+23 touch the bounds, but with 24 lags examined at the 5% level one or two
+such crossings are expected by chance and no isolated lag carries a
+structural interpretation.
+
+
+ 
+## 6.3 Model Selection
+ 
+The general model is
+ 
+$$
+\phi(B)(1 - B)^d y_t = c + \theta(B)\,\varepsilon_t
+$$
+ 
+where $B$ is the backshift operator and $\phi$, $\theta$ are the
+autoregressive and moving-average polynomials of orders $p$ and $q$. We
+hold out the last twelve months so the model can later be judged on data
+it has never seen.
+ 
+```{r}
+train = window(man_ts, end = c(2025, 5))
+ 
+fit1 = auto.arima(train)
+summary(fit1)
+```
+ 
+## 6.4 Comparing Alternatives
+ 
+AIC is only comparable across models fitted to the **same** differenced
+series. If `auto.arima` selected a different order of differencing, or
+added a seasonal part, the comparison below is meaningless. So we check
+the order first.
+ 
+```{r}
+setNames(fit1$arma, c("p", "q", "P", "Q", "period", "d", "D"))
+```
+ 
+```{r}
+stopifnot(fit1$arma[6] == 1, fit1$arma[3] == 0, fit1$arma[4] == 0)
+ 
+fit2 = Arima(train, order = c(2, 1, 0))
+fit3 = Arima(train, order = c(2, 1, 2))
+ 
+round(c(auto = fit1$aic, ar2 = fit2$aic, both = fit3$aic), 2)
+```
+
+
+ The automatic selection wins clearly. ARIMA(0,1,2) with drift scores
+**480.08**, against **484.99** for ARIMA(2,1,2) and **486.24** for
+ARIMA(2,1,0). A gap of five to six AIC points is substantial. The
+agreement matters as much as the ranking: the specification chosen by
+AICc is the same one the correlation plots pointed to, so two independent
+routes — visual identification and automatic search — converge on the
+same model.
+
+
+
+# 7. Validation
+ 
+## 7.1 Out-of-Sample Accuracy
+ 
+With $e_t$ the forecast errors over the $h = 12$ held-out months,
+ 
+$$
+\mathrm{MASE} =
+\frac{\frac{1}{h}\sum |e_t|}
+     {\frac{1}{n-1}\sum_{t=2}^{n} |y_t - y_{t-1}|}
+$$
+ 
+The denominator is the error of a naive forecast $\hat{y}_t = y_{t-1}$,
+so $\mathrm{MASE} < 1$ means the model beats carrying the last value
+forward. The **Test set** row is the one that matters.
+ 
+```{r}
+test = window(man_ts, start = c(2025, 6))   # 12 months the model never saw
+ 
+fc = forecast(fit1, h = 12)
+ 
+round(accuracy(fc, test), 3)
+```
+
+The model forecasts better than the benchmark. On the twelve held-out
+months the MASE is **0.723**, meaning the average error is about 72% of
+what a naive "carry the last value forward" forecast would produce.
+Theil's U of **0.916** points the same way. The mean absolute percentage
+error is **5.8%**.
+
+One feature deserves attention. The mean error on the test set is
+**+1.55**, and a positive mean error means the model **under-forecast**
+the manufactured share in those months: the rise through late 2025 and
+early 2026 was faster than the fitted drift anticipated. The gap between
+the training MASE of 0.523 and the test MASE of 0.723 is the expected
+cost of forecasting genuinely unseen data, and the size of that gap is
+modest.
+
+ 
+## 7.2 Residual Diagnostics
+ 
+If the model has captured the structure of the series, nothing
+predictable should remain in the residuals. The Ljung-Box test takes
+independence as its null, so here a **large** $p$-value is the good
+result.
+ 
+```{r}
+checkresiduals(fit1)
+```
+ The residuals pass. The Ljung-Box statistic over 24 lags is **19.09** on
+22 degrees of freedom, giving $p = 0.64$ — far from rejection. There is
+no evidence of remaining autocorrelation, the residual plot shows no
+systematic pattern, and the histogram is approximately normal.
+
+This does not prove the model is correct; a test that fails to reject is
+not a test that confirms. What it does establish is that no obvious
+structure has been left unmodelled.
+
+# 8. Forecast
+ 
+## 8.1 Final Model
+ 
+```{r}
+fit_final = auto.arima(man_ts)
+summary(fit_final)
+```
+Refitting on all 137 observations selects **the same specification** as
+the model validated in Section 7 — ARIMA(0,1,2) with drift — so the
+out-of-sample performance reported there applies directly to the model
+used for forecasting. The coefficients shift slightly with the extra
+year of data, and the drift term strengthens from 0.100 to **0.1125**
+percentage points a month, now significant at the 5% level. The recent
+months have reinforced the upward trend rather than tempering it.
+
+## 8.2 Forecast to 2030
+ 
+The horizon runs from June 2026 to December 2030, $h = 55$ months.
+Prediction intervals take the form
+ 
+$$
+\hat{y}_{T+h} \pm z_{1-\alpha/2}\,\hat{\sigma}_h,
+\qquad \hat{\sigma}_h \propto \sqrt{h}
+$$
+ 
+which is why the band widens as it moves right rather than staying
+parallel.
+ 
+```{r, fig.width=8, fig.height=4}
+fc_2030 = forecast(fit_final, h = 55)
+ 
+autoplot(fc_2030) +
+  geom_hline(yintercept = tail(fc_2030$mean, 1),
+             linetype = "dashed", color = "grey50", linewidth = 0.4) +
+  labs(title = "Forecast of the Manufactured Share to 2030",
+       subtitle = paste0(as.character(fit_final),
+                         ", 80% and 95% prediction intervals"),
+       x = NULL, y = "Share of total exports (%)") +
+  theme(plot.title    = element_text(face = "bold", size = 13),
+        plot.subtitle = element_text(color = "grey40", size = 9.5))
+```
+ 
+```{r}
+round(c(forecast = tail(fc_2030$mean, 1),
+        lower95  = tail(fc_2030$lower[, 2], 1),
+        upper95  = tail(fc_2030$upper[, 2], 1)), 2)
+```
+ 
+By December 2030 the model places the manufactured share at
+**`r sprintf("%.1f%%", tail(fc_2030$mean, 1))`**, with a 95% prediction
+interval running from **`r sprintf("%.1f%%", tail(fc_2030$lower[, 2], 1))`**
+to **`r sprintf("%.1f%%", tail(fc_2030$upper[, 2], 1))`**. The width of
+that interval is itself part of the result, and Section 10 explains why
+it should not be read as a precise target.
+ 
+# 9. Summary
+ 
+> **The composition has shifted.** Manufactured goods made up
+> **`r sprintf("%.0f%%", man$share[1])`** of Saudi exports at the start of
+> 2015 and **`r sprintf("%.0f%%", man$share[nrow(man)])`** by mid-2026.
+> Every category grew in absolute terms over the decade — oil exports
+> included — but manufactured exports grew more than four times faster
+> than raw materials, and that difference is what moved the structure.
+
+## 9.1 The three categories
+ 
+```{r, echo=FALSE}
+yr = function(v, y, f) tapply(v[monthly$year == y], monthly$cat[monthly$year == y], f)
+ 
+s15 = yr(monthly$share, 2015, mean);  s25 = yr(monthly$share, 2025, mean)
+a15 = yr(monthly$value, 2015, sum);   a25 = yr(monthly$value, 2025, sum)
+ 
+cat_tbl = data.frame(
+  Category                  = names(s15),
+  `Share in 2015`           = sprintf("%.1f%%", s15),
+  `Share in 2025`           = sprintf("%.1f%%", s25),
+  `Change`                  = sprintf("%+.1f points", s25 - s15),
+  `Growth in value, a year` = sprintf("%+.1f%%", 100 * ((a25 / a15)^(1/10) - 1)),
+  check.names               = FALSE)
+ 
+kbl(cat_tbl, align = c("l", "r", "r", "r", "r")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+ 
+The last column is the one that settles the question. A share can rise
+simply because something else fell, but this column measures each
+category against its own past, in riyals. Manufactured exports grew on
+their own terms.
+ 
+## 9.2 The figures at a glance
+ 
+```{r, echo=FALSE}
+plain = data.frame(
+  Quantity = c(
+    "Period covered",
+    "Total exports over the period",
+    "Average exports a year",
+    "Manufactured share, start",
+    "Manufactured share, latest",
+    "Change over the period",
+    "Average change a year",
+    "Projected share by December 2030",
+    "Range the projection could fall in"),
+  Value = c(
+    paste(format(min(monthly$date), "%B %Y"), "to",
+          format(max(monthly$date), "%B %Y")),
+    sprintf("%.1f trillion riyals", sum(monthly$value) / 1e6),
+    sprintf("%.2f trillion riyals", 12 * mean(tot) / 1e6),
+    sprintf("%.1f%%", man$share[1]),
+    sprintf("%.1f%%", man$share[nrow(man)]),
+    sprintf("%+.1f points", man$share[nrow(man)] - man$share[1]),
+    sprintf("%+.2f points", coef(trend_model)["t"] * 12),
+    sprintf("%.1f%%", tail(fc_2030$mean, 1)),
+    sprintf("%.0f%% to %.0f%%", tail(fc_2030$lower[, 2], 1),
+                                tail(fc_2030$upper[, 2], 1))))
+ 
+kbl(plain, col.names = c("", "Value"), align = c("l", "r")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+ 
+The last row deserves emphasis. The projection is a direction, not a
+target: the range around it is wide because four and a half years is a
+long way to look ahead from eleven years of data.
+ 
+# 10. Limitations
+ 
+Four constraints affect how the results above should be read.
+ 
+1. **Shares are not independent.** The adding-up constraint implies
+ 
+   $$
+   \sum_i \Delta s_{i,t} = 0
+   $$
+ 
+   so the three series cannot move freely. A rise in the manufactured
+   share is arithmetically identical to a fall in the sum of the other
+   two. This is why Section 4.2 checks the absolute values: it is the
+   only part of the analysis that can distinguish real growth in
+   manufacturing from a mechanical effect of falling oil exports.
+ 
+2. **The forecast horizon is long relative to the data.** We project 55
+   months forward from 137 observations. Prediction intervals widen with
+   the square root of the horizon, which is why the 2030 interval is so
+   much wider than the 2027 one. The central forecast is a continuation
+   of the estimated drift, not a prediction of policy.
+ 
+3. **The model can leave the admissible range.** A share is bounded
+   between 0 and 100, but an ARIMA model with drift extrapolates linearly
+   and knows nothing about that bound. In this case the upper 95% limit
+   reaches 46.3% and the problem does not bind, but that is a property of
+   these particular numbers rather than of the method. Modelling
+
+   $$
+   z_t = \log\!\left(\frac{s_t}{100 - s_t}\right)
+   $$
+
+   and inverting afterwards would respect the bound by construction, at
+   any horizon. We did not apply it here because the raw limits remained
+   plausible.
+ 
+4. **Structural breaks are treated as noise.** The shocks identified in
+   Section 5.4 — the 2020 collapse in particular — are absorbed into the
+   remainder rather than modelled. A model that allowed the trend to
+   change slope after 2020 might fit the recent years better, at the cost
+   of relying on a break date chosen after seeing the data.
+ 
+# 11. Conclusion
+ 
+The question was whether the composition of Saudi exports has shifted
+from raw materials toward manufactured goods between 2015 and 2026. The
+evidence points in one direction, with qualifications.
+ 
+The manufactured share rose from
+**`r sprintf("%.1f%%", man$share[1])`** to
+**`r sprintf("%.1f%%", man$share[nrow(man)])`** over the period, an
+average of **`r sprintf("%.2f", coef(trend_model)["t"] * 12)`** percentage
+points a year. The trend remains statistically significant after
+correcting the standard errors for autocorrelation, so it is not a
+by-product of month-to-month noise.
+ 
+Section 4.2 shows there was no denominator effect at all. Raw material
+exports grew 27% over the decade and semi-manufactured exports 40%, while
+manufactured exports grew 173% — a compound rate of 10.6% a year against
+2.4% for raw materials. The shift in composition came entirely from
+differential growth, not from contraction anywhere.
+ 
+Extending the fitted model to 2030 gives a central estimate of
+**`r sprintf("%.1f%%", tail(fc_2030$mean, 1))`**. The prediction interval
+is wide, and the limitations in Section 10 explain why: the horizon is
+long, the model is unaware that a share is bounded, and the 2020 break is
+absorbed rather than modelled. The direction of the result is firmer than
+its magnitude.
+ 
+# 12. Technical Appendix
+ 
+The figures below are for readers who want to check the statistical basis
+of the results. Each is explained in the section it came from.
+ 
+```{r, echo=FALSE}
+Ft = max(0, 1 - var(R) / var(comp[, "trend"]    + R))
+Fs = max(0, 1 - var(R) / var(comp[, "seasonal"] + R))
+nw = coeftest(trend_model, vcov = NeweyWest(trend_model))
+lb = Box.test(residuals(fit1), lag = 24,
+              fitdf = sum(fit1$arma[1:2]), type = "Ljung-Box")
+ 
+tech = data.frame(
+  Quantity = c(
+    "Observations",
+    "Trend slope (percentage points per year)",
+    "Trend p-value, Newey-West corrected",
+    "Trend strength, F_T",
+    "Seasonal strength, F_S",
+    "Selected model",
+    "Out-of-sample MASE (12 months held out)",
+    "Ljung-Box p-value, 24 lags",
+    "Forecast horizon"),
+  Value = c(
+    sprintf("%d months x 3 categories", nrow(man)),
+    sprintf("%+.3f", coef(trend_model)["t"] * 12),
+    format.pval(nw["t", 4], digits = 3, eps = 1e-4),
+    sprintf("%.3f", Ft),
+    sprintf("%.3f", Fs),
+    as.character(fit_final),
+    sprintf("%.3f", accuracy(fc, test)["Test set", "MASE"]),
+    sprintf("%.3f", lb$p.value),
+    "55 months"),
+  Section = c("2", "4.3", "4.3", "5.2", "5.2", "8.1", "7.1", "7.2", "8.2"))
+ 
+kbl(tech, align = c("l", "r", "c")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+ 
+# 13. References
+ 
+General Authority for Statistics (GASTAT). *International Trade
+Statistics — Exports by Nature of Materials*, monthly series,
+January 2015 – May 2026. Statistical Database.
+**Accessed 17 September 2026.**
