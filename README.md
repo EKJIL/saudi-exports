@@ -7,7 +7,7 @@ January 2015 – May 2026.
 materials toward manufactured goods — and if so, is it real growth or an
 arithmetic side effect of falling oil exports?
 
-📄 **[Read the report](https://rpubs.com/YOUR_USERNAME/XXXXXX)** ·
+📄 [Read the full report](https://ekjil.github.io/saudi-exports/)
 Built in R Markdown.
 
 ---
