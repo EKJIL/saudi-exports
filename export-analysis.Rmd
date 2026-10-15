@@ -843,8 +843,8 @@ from raw materials toward manufactured goods between 2015 and 2026. The
 evidence points in one direction, with qualifications.
  
 The manufactured share rose from
-**`r sprintf("%.1f%%", man$share[1])`** to
-**`r sprintf("%.1f%%", man$share[nrow(man)])`** over the period, an
+**`r sprintf("%.1f%%", man$share[1])`** (January 2015) to
+**`r sprintf("%.1f%%", man$share[nrow(man)])`** (May 2026), an
 average of **`r sprintf("%.2f", coef(trend_model)["t"] * 12)`** percentage
 points a year. The trend remains statistically significant after
 correcting the standard errors for autocorrelation, so it is not a
