@@ -265,7 +265,7 @@ while the **raw materials** share moves in the opposite direction. The
 Two features of the chart deserve attention:
  
 1. **The movement is not smooth.** All three series fluctuate month to
-   month, and there are sharp reversals in 2016, 2020 and 2023. We come
+   month, and there are sharp reversals in 2017, 2020 and 2023. We come
    back to these in Section 5.4.
  
 2. **The rise is not constant.** The manufactured share climbs quickly
