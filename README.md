@@ -46,6 +46,10 @@ was no contraction anywhere in the denominator.
 .
 ├── export-analysis.Rmd     # the analysis
 ├── exports_clean.csv       # aggregated monthly data
+├── index.html              # knitted report (GitHub Pages)
+├── social-meta.html        # link-preview tags, included in the report header
+├── preview.png             # link-preview image (1200×627)
+├── scripts/make_preview.py # rebuilds preview.png from the CSV
 └── README.md
 ```
 

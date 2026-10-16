@@ -16,6 +16,8 @@ output:
     df_print: kable
     fig_caption: true
     self_contained: true
+    includes:
+      in_header: social-meta.html
 ---
 
 # 1. Introduction
